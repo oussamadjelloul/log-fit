@@ -99,15 +99,15 @@ def test_backbone_decision_overrides_default(tmp_path: Path) -> None:
 
 def test_training_backbone_override_has_priority(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-  _write_yaml(
-    config_path, _base_yaml_with_training_backbone("roberta-base")
-  )
+    _write_yaml(
+        config_path, _base_yaml_with_training_backbone("roberta-base")
+    )
 
-  decision_path = tmp_path / "backbone_decision.json"
-  decision_path.write_text(
-    json.dumps({"chosen_backbone": "allenai/longformer-base-4096"}),
-    encoding="utf-8",
-  )
+    decision_path = tmp_path / "backbone_decision.json"
+    decision_path.write_text(
+        json.dumps({"chosen_backbone": "allenai/longformer-base-4096"}),
+        encoding="utf-8",
+    )
 
     cfg = build_training_config(config_path, decision_path)
     assert cfg.backbone == "roberta-base"

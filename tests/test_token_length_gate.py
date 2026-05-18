@@ -90,8 +90,9 @@ class TestThresholds:
         captured = capsys.readouterr()
         assert "SUPERVISOR_FLAG" in captured.out
         assert "HARD FAIL" not in captured.out
-        # Truncation rate: 7 of 10 paragraphs > 512 = 70%
-        assert summary.truncation_rate_at_backbone_limit == 0.7
+        # Truncation rate: 6 of 10 paragraphs > 512 = 60%
+        # (values 600, 700, 800, 900, 1000, 1200 are above 512)
+        assert summary.truncation_rate_at_backbone_limit == 0.6
 
     def test_hard_fail_raises_when_max_above_5x_limit(self):
         # max = 3000 > 5 × 512 = 2560 → HARD FAIL

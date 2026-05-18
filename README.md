@@ -2,7 +2,7 @@
 
 Faithful reproduction of:
 
-> Almodovar, C., Sabrina, F., Karimi, S., Azad, S. (2024). *LogFiT: Log Anomaly Detection Using Fine-Tuned Language Models.* IEEE Transactions on Network and Service Management, 21(2), 1715-1723.
+> Almodovar, C., Sabrina, F., Karimi, S., Azad, S. (2024). _LogFiT: Log Anomaly Detection Using Fine-Tuned Language Models._ IEEE Transactions on Network and Service Management, 21(2), 1715-1723.
 
 ## Status
 
@@ -40,8 +40,24 @@ See `docs/logfit-repro-decisions-v1.2.md` Section 8. Order:
 5. Backbone selection
 6. 5-fold splitter
 7. Single-fold smoke test on HDFS
-8-13. Full runs + variability + throughput
-14. Results writeup
+   8-13. Full runs + variability + throughput
+8. Results writeup
+
+## Training module
+
+Training is implemented in [src/train.py](src/train.py) as library functions. The
+main entrypoint is `train_fold_from_paths(...)`, which loads the YAML config,
+paragraphs, and splits, then trains one fold.
+
+Backbone selection is resolved in this order:
+
+1. YAML defaults (`backbone.roberta_id` / `training.use_longformer`).
+2. Backbone decision artifact (from [src/select_backbone.py](src/select_backbone.py))
+   if `backbone_decision_path` is provided.
+3. Explicit YAML override (`training.backbone`) if set.
+
+This preserves the v1.4 phase-override behavior while allowing the automated
+selection artifact to drive training.
 
 ## Determinism contract
 

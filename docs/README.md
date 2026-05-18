@@ -2,10 +2,10 @@
 
 Authoritative documents for this reproduction (locked at v1.2 post-adversarial-review):
 
-| File | Purpose |
-|---|---|
+| File                             | Purpose                                                                         |
+| -------------------------------- | ------------------------------------------------------------------------------- |
 | `logfit-repro-decisions-v1.2.md` | All methodology decisions (L1-L27 locked from paper, D1-D18 reproducer choices) |
-| `logfit-repro-spec-v1.2.md` | Implementation specification (Components 0-14) |
+| `logfit-repro-spec-v1.2.md`      | Implementation specification (Components 0-14)                                  |
 
 ## To populate this directory
 
@@ -34,3 +34,9 @@ to this repo.
   conditional timestamp-strip), Q7 (fp16 weight divergence threshold).
 - Numeric values in spec Section 6 (paper Tables III/IV/V/VII) need transcription
   before the +/-0.02 F1 tolerance becomes a concrete contract.
+
+## Implementation notes
+
+- Training is implemented in [src/train.py](../src/train.py). It can consume the
+  backbone decision artifact written by [src/select_backbone.py](../src/select_backbone.py)
+  to drive `training.backbone` automatically, while allowing an explicit YAML override.

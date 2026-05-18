@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logfit-repro"
+version = "0.1.0"
+description = "Faithful reproduction of LogFiT (Almodovar et al., IEEE TNSM 21(2), 2024)"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+authors = [
+    { name = "Oussama", email = "oussama@ulaval.ca" },
+]
+license = { text = "MIT" }
+
+# Pinned versions per decisions-v1.2 D8 (T5/T7) — version-stability matters
+# for determinism and for callback semantics (TrainerState.epoch).
+dependencies = [
+    "torch==2.3.1",
+    "transformers==4.45.0",        # PIN: D15 callback semantics version-stable
+    "tokenizers==0.20.0",
+    "datasets==2.21.0",
+    "numpy==1.26.4",
+    "scikit-learn==1.5.1",
+    "pandas==2.2.2",
+    "nltk==3.8.1",                  # WordNet for D17 variability test
+    "pyyaml==6.0.2",
+    "tqdm==4.66.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.2",
+    "pytest-cov==5.0.0",
+    "ruff==0.6.4",
+    "mypy==1.11.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --strict-markers"

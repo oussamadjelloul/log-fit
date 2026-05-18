@@ -9,7 +9,7 @@ description = "Faithful reproduction of LogFiT (Almodovar et al., IEEE TNSM 21(2
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 authors = [
-    { name = "Oussama", email = "oussama@ulaval.ca" },
+    { name = "Oussama Djelloul"},
 ]
 license = { text = "MIT" }
 

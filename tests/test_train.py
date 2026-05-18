@@ -62,17 +62,17 @@ determinism:
 
 
 def _base_yaml_with_training_backbone(backbone: str) -> str:
-  base = _base_yaml().splitlines()
-  out: list[str] = []
-  inserted = False
-  for line in base:
-    out.append(line)
-    if line.strip() == "training:":
-      out.append(f"  backbone: {backbone}")
-      inserted = True
-  if not inserted:
-    raise RuntimeError("Failed to insert training.backbone")
-  return "\n".join(out) + "\n"
+    base = _base_yaml().splitlines()
+    out: list[str] = []
+    inserted = False
+    for line in base:
+        out.append(line)
+        if line.strip() == "training:":
+            out.append(f"  backbone: {backbone}")
+            inserted = True
+    if not inserted:
+        raise RuntimeError("Failed to insert training.backbone")
+    return "\n".join(out) + "\n"
 
 
 def test_backbone_default_is_roberta(tmp_path: Path) -> None:
@@ -99,7 +99,9 @@ def test_backbone_decision_overrides_default(tmp_path: Path) -> None:
 
 def test_training_backbone_override_has_priority(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-  _write_yaml(config_path, _base_yaml_with_training_backbone("roberta-base"))
+  _write_yaml(
+    config_path, _base_yaml_with_training_backbone("roberta-base")
+  )
 
   decision_path = tmp_path / "backbone_decision.json"
   decision_path.write_text(

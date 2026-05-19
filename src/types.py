@@ -131,6 +131,20 @@ class FoldSpec:
 
 
 @dataclass
+class ParagraphScore:
+    paragraph_id: str
+    label: int
+    topk_accuracies: dict[int, float]
+
+
+@dataclass
+class SplitScores:
+    split_name: str
+    topk_grid: list[int]
+    scores: list[ParagraphScore]
+
+
+@dataclass
 class TuningCell:
     top_k: int
     threshold: float

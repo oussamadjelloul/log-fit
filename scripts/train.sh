@@ -30,7 +30,8 @@
 #       sbatch --account=<your-account> scripts/train.sh ...
 #
 # Prerequisites:
-#   - ~/sdd_env activated venv with pyproject.toml deps installed
+#   - ~/sdd_activate.sh exists (the project's canonical activation script
+#     that loads modules + activates the venv + sets PYTHONPATH for pyarrow)
 #   - data/ symlinked to $SCRATCH/log-fit/data (paragraphs.pkl + splits.json present)
 #   - results/ symlinked to $SCRATCH/log-fit/results (will hold logs + models)
 #   - submitted from the project root (./ contains pyproject.toml and src/)
@@ -52,12 +53,12 @@ PARAGRAPHS_PATH="${2:?missing paragraphs.pkl path}"
 SPLITS_PATH="${3:?missing splits.json path}"
 BACKBONE_DECISION_PATH="${4:-}"   # optional
 
-# ----- Narval modules -----
-module load StdEnv/2023
-module load arrow/24.0.0
-
-# ----- project venv (shared with SDD) -----
-source ~/sdd_env/bin/activate
+# ----- environment: use the project's canonical activation script -----
+# Mirrors the interactive setup; guarantees pyarrow visibility (via the
+# arrow/24.0.0 module's PYTHONPATH) and venv state regardless of which
+# shell submitted this job. Replaces the prior module-load + venv-activate
+# block which was brittle to submission shell state.
+source ~/sdd_activate.sh
 
 # ----- determinism env (spec Component 14) -----
 export PYTHONHASHSEED=0

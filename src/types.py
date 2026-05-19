@@ -4,7 +4,14 @@ Pure data containers — no methodology decisions are embedded here. Every
 methodology decision lives in src/* modules that produce or consume these
 types. The dataclasses themselves are versioned with the spec.
 
-Reference: logfit-repro-spec-v1.3.md Component 0 (notation) and Component 12 (API).
+Reference: logfit-repro-spec-v1.3.md Component 0 (notation) and Component 12 (API);
+decisions-v1.5 D_NEW7/D_NEW8 for scoring schema additions.
+
+v1.5 changes:
+- TopKAccuracyRecord NEW (records-format scoring per D_NEW7).
+- ParagraphScore.topk_accuracies: dict[int, float] -> list[TopKAccuracyRecord].
+- ParagraphScore gains `n_masked_total` and `n_passes` audit fields.
+- SplitScores gains `n_passes` (mirror at split level for downstream consumers).
 
 v1.3 changes:
 - DropCounters: split `singleton_window` into `singleton_window_normal` and
@@ -131,17 +138,56 @@ class FoldSpec:
 
 
 @dataclass
+class TopKAccuracyRecord:
+    """One top-k accuracy row for a paragraph.
+
+    v1.5 D_NEW7: scoring output uses a list of these records instead of
+    `dict[int, float]` to avoid JSON int-key coercion fragility. When the
+    dict form was persisted, keys became strings on disk; downstream
+    consumers indexing by `scores[K]` (int) hit KeyError on reload.
+
+    A `top_k` is always a positive int; `accuracy` is in [0.0, 1.0].
+    Records within a paragraph are ordered ascending by `top_k`.
+    """
+
+    top_k: int
+    accuracy: float
+
+
+@dataclass
 class ParagraphScore:
+    """Per-paragraph score artifact persisted by `src.score`.
+
+    v1.5 changes (D_NEW7, D_NEW8):
+    - `topk_accuracies` is now a list of TopKAccuracyRecord (records format).
+    - `n_masked_total` exposes the total number of masked positions scored
+      across all passes (sum across passes when `n_passes > 1`). A zero
+      value means stochastic masking produced no scorable positions for
+      this paragraph; per spec convention `topk_accuracies` records each
+      carry `accuracy=1.0` in that degenerate case.
+    - `n_passes` mirrors the run-level config for self-contained audits.
+    """
+
     paragraph_id: str
     label: int
-    topk_accuracies: dict[int, float]
+    topk_accuracies: list[TopKAccuracyRecord]
+    n_masked_total: int = 0
+    n_passes: int = 1
 
 
 @dataclass
 class SplitScores:
+    """Wraps the scored output of one (fold, split) pair.
+
+    v1.5: `n_passes` added at the split level so downstream consumers
+    (tune_threshold, evaluate) don't have to peek inside `scores[0]` to
+    learn the run configuration.
+    """
+
     split_name: str
     topk_grid: list[int]
     scores: list[ParagraphScore]
+    n_passes: int = 1
 
 
 @dataclass

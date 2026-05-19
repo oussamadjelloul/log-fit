@@ -156,9 +156,45 @@ class GradualUnfreezingCallback(TrainerCallback):
 
 
 class TopKAccuracyLogger(TrainerCallback):
-    """Compute top-1 masked-token accuracy on the training set each epoch."""
+    """Compute top-1 masked-token accuracy each epoch using a SEPARATE eval
+    Dataset, so the training Dataset's RNG state is not perturbed.
 
-    def __init__(self) -> None:
+    B1 fix: previously this callback iterated ``trainer.get_train_dataloader()``,
+    which advanced the training Dataset's internal RNG by N calls per epoch.
+    Adding/removing this callback (or changing eval frequency) silently
+    altered the training mask sequence and final weight SHA256. Now we use
+    a dedicated eval Dataset with its own RNG instance — eval cannot
+    perturb training.
+
+    The ``reset_rng_each_epoch`` flag (default True) controls whether the
+    eval Dataset's RNG is reset to its construction seed at the start of
+    every epoch's eval pass:
+
+    - True  (default): eval mask sequence is IDENTICAL every epoch, so the
+      logged top-1 accuracy across epochs is directly comparable — any
+      delta is attributable to model weight changes alone. Best for
+      diagnostic learning curves.
+    - False: RNG advances naturally per epoch, so each epoch's top-1 is
+      measured on a FRESH mask sample from the training distribution.
+      Mirrors training-time stochasticity; the metric measures robustness
+      across mask perturbations rather than weight progress alone.
+
+    Note: with default True, only the FINAL epoch's top-1 is used by
+    Component 6's threshold-tuning grid, so the practical effect of this
+    flag is mainly on intra-training diagnostics.
+    """
+
+    def __init__(
+        self,
+        eval_dataset: MaskedSentenceDataset,
+        collator: MaskedSentenceCollator,
+        batch_size: int,
+        reset_rng_each_epoch: bool = True,
+    ) -> None:
+        self._eval_dataset = eval_dataset
+        self._collator = collator
+        self._batch_size = batch_size
+        self._reset_rng_each_epoch = reset_rng_each_epoch
         self._trainer: Trainer | None = None
 
     def attach_trainer(self, trainer: Trainer) -> None:
@@ -168,10 +204,24 @@ class TopKAccuracyLogger(TrainerCallback):
         if self._trainer is None:
             return control
 
+        # Reset eval Dataset RNG so every epoch evaluates on the same fixed
+        # mask set — makes the top-1 learning curve cleanly comparable
+        # across epochs. Disable via reset_rng_each_epoch=False to get
+        # fresh masks per epoch instead.
+        if self._reset_rng_each_epoch:
+            self._eval_dataset.reset_rng()
+
         model = self._trainer.model
-        dataloader = self._trainer.get_train_dataloader()
         model_was_training = model.training
         model.eval()
+
+        dataloader = torch.utils.data.DataLoader(
+            self._eval_dataset,
+            batch_size=self._batch_size,
+            shuffle=False,
+            collate_fn=self._collator,
+            num_workers=0,
+        )
 
         correct = 0
         total = 0
@@ -225,6 +275,35 @@ def _resolve_batch_sizes(
             f"(got {effective_batch_size} vs {physical_batch_size})"
         )
     return physical_batch_size, effective_batch_size // physical_batch_size
+
+
+def _compute_steps_per_epoch(
+    n_samples: int,
+    physical_batch_size: int,
+    gradient_accumulation_steps: int,
+) -> int:
+    """Optimizer-update steps per epoch, matching HF Trainer 4.45's behavior.
+
+    HF's `_inner_training_loop` triggers `optimizer.step() + scheduler.step()`
+    whenever ``(step + 1) % accum == 0 OR (step + 1) == steps_in_epoch``. The
+    second clause flushes the partial accumulation group at the end of every
+    epoch, so the per-epoch update count is::
+
+        ceil(len_dataloader / accum) = ceil(N / (bs * accum))
+
+    (The two forms are mathematically equivalent for positive integers.)
+
+    Earlier revisions of this helper used ``floor(len_dataloader / accum)``
+    on the (incorrect) assumption that HF dropped the remainder. That
+    undercounts by 1 whenever there's a partial group at end-of-epoch and
+    causes ``OneCycleLR`` to raise ``ValueError: Tried to step X times``
+    when HF calls scheduler.step() once more than total_steps allows.
+
+    References: HF trainer.py do_sync_step logic; issue #36297.
+    """
+    return max(
+        1, math.ceil(n_samples / (physical_batch_size * gradient_accumulation_steps))
+    )
 
 
 def load_paragraphs(paragraphs_pkl_path: Path | str) -> list[Paragraph]:
@@ -353,12 +432,10 @@ def _lr_grid_search(
         )
         collator = MaskedSentenceCollator(tokenizer)
 
-        steps_per_epoch = max(
-            1,
-            math.ceil(
-                len(dataset)
-                / (config.physical_batch_size * config.gradient_accumulation_steps)
-            ),
+        steps_per_epoch = _compute_steps_per_epoch(
+            n_samples=len(dataset),
+            physical_batch_size=config.physical_batch_size,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
         )
         total_steps = steps_per_epoch  # 1 epoch for grid search
 
@@ -449,15 +526,17 @@ def train_fold(
             output_dir=run_dir,
             backbone_token_limit=backbone_token_limit,
         )
+        # B2: grid search trained 4 models, advancing the global torch RNG.
+        # Re-seed so main training is identical whether max_lr was searched
+        # or provided directly. Preserves the T7 weight-SHA256 audit.
+        set_all_seeds(config.seed)
 
     model = AutoModelForMaskedLM.from_pretrained(config.backbone)
 
-    steps_per_epoch = max(
-        1,
-        math.ceil(
-            len(dataset)
-            / (config.physical_batch_size * config.gradient_accumulation_steps)
-        ),
+    steps_per_epoch = _compute_steps_per_epoch(
+        n_samples=len(dataset),
+        physical_batch_size=config.physical_batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
     )
     total_steps = config.epochs * steps_per_epoch
 
@@ -472,6 +551,18 @@ def train_fold(
 
     args = _build_training_args(run_dir, config)
 
+    # B1: separate eval Dataset for the top-1 logger so eval doesn't perturb
+    # the training Dataset's RNG. seed+1 keeps the eval mask stream decoupled
+    # from any single training epoch's mask stream.
+    eval_dataset = MaskedSentenceDataset(
+        paragraphs=train_paragraphs,
+        tokenizer=tokenizer,
+        backbone_token_limit=backbone_token_limit,
+        r_sent=config.masking_sentence_ratio,
+        r_tok=config.masking_token_ratio,
+        seed=config.seed + 1,
+    )
+
     unfreeze_cb = GradualUnfreezingCallback(
         model=model,
         epoch_1_unfrozen_layers=config.epoch_1_unfrozen_layers,
@@ -479,7 +570,11 @@ def train_fold(
         epoch_3_plus_unfrozen_layers=config.epoch_3_plus_unfrozen_layers,
         embeddings_frozen_until_epoch=config.embeddings_frozen_until_epoch,
     )
-    top1_cb = TopKAccuracyLogger()
+    top1_cb = TopKAccuracyLogger(
+        eval_dataset=eval_dataset,
+        collator=collator,
+        batch_size=config.physical_batch_size,
+    )
 
     trainer = Trainer(
         model=model,
@@ -508,11 +603,11 @@ def train_fold(
     train_top1_acc = _extract_last_top1_acc(log_history)
     epoch_losses = _extract_epoch_losses(log_history)
 
-    if train_top1_acc < 0.5:
-        raise RuntimeError(
-            f"Training failed: train_top1_acc={train_top1_acc:.3f} < 0.5"
-        )
+    training_failed = train_top1_acc < 0.5
 
+    # B3: write the audit log BEFORE raising on failure. Otherwise diagnostic
+    # fields (epoch_losses, max_lr, lr_grid_results, determinism_env) are lost
+    # on the exact runs where they're most needed.
     train_log = {
         "dataset": config.dataset,
         "window_seconds": config.window_seconds,
@@ -527,8 +622,15 @@ def train_fold(
         "epoch_losses": epoch_losses,
         "train_top1_acc": train_top1_acc,
         "model_weight_sha256": model_weight_sha256,
+        "training_failed": training_failed,
     }
     save_json(train_log, run_dir / "train_log.json")
+
+    if training_failed:
+        raise RuntimeError(
+            f"Training failed: train_top1_acc={train_top1_acc:.3f} < 0.5 "
+            f"(diagnostics: {run_dir / 'train_log.json'})"
+        )
 
     trained = TrainedFold(
         fold_idx=fold.fold_id,
@@ -694,3 +796,89 @@ def train_fold_from_paths(
         resume_from_checkpoint=resume_from_checkpoint,
     )
     return trained
+
+
+def _build_arg_parser():
+    """CLI for one-fold training, invoked by scripts/train.sh."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.train",
+        description="Train one fold of the LogFiT reproduction (spec §4).",
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        help="Dataset config YAML (e.g., configs/hdfs.yaml).",
+    )
+    parser.add_argument(
+        "--paragraphs",
+        required=True,
+        type=Path,
+        help="Path to paragraphs.pkl produced by src.prepare_*.",
+    )
+    parser.add_argument(
+        "--splits",
+        required=True,
+        type=Path,
+        help="Path to splits.json produced by src.splits.",
+    )
+    parser.add_argument(
+        "--fold-idx",
+        required=True,
+        type=int,
+        help="Fold index (0..N_FOLDS-1). On SLURM array jobs, pass $SLURM_ARRAY_TASK_ID.",
+    )
+    parser.add_argument(
+        "--backbone-decision",
+        type=Path,
+        default=None,
+        help="Optional backbone_choice.json from src.select_backbone. "
+             "If the file doesn't exist, falls through to YAML default.",
+    )
+    parser.add_argument(
+        "--runs-root",
+        type=Path,
+        default=Path("runs"),
+        help="Root directory for run outputs (default: ./runs).",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Optional checkpoint path to resume from (HF Trainer convention).",
+    )
+    parser.add_argument(
+        "--fp16-verify",
+        action="store_true",
+        help="Run T7 fp16 verification: trains the same fold TWICE and "
+             "compares weight SHA256. Doubles training cost — use sparingly.",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    trained = train_fold_from_paths(
+        config_path=args.config,
+        paragraphs_pkl_path=args.paragraphs,
+        splits_path=args.splits,
+        fold_idx=args.fold_idx,
+        backbone_decision_path=args.backbone_decision,
+        runs_root=args.runs_root,
+        resume_from_checkpoint=args.resume,
+        fp16_verification=args.fp16_verify,
+    )
+    print(
+        f"[train.py] Fold {trained.fold_idx} complete: "
+        f"top1_acc={trained.train_top1_acc:.4f}, "
+        f"sha256={trained.model_weight_sha256[:16]}..."
+    )
+    print(f"[train.py] Model saved to: {trained.model_path}")
+
+
+if __name__ == "__main__":
+    main()

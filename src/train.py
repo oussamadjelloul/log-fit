@@ -729,23 +729,32 @@ def build_training_config(
         training["effective_batch_size"], physical_bs
     )
 
+    # Defensive numeric coercion. PyYAML's safe_load follows YAML 1.1 float
+    # semantics: values like `1.0e4` (no sign on exponent) silently parse as
+    # STRINGS, not floats. Earlier this bit `final_div_factor` and only
+    # surfaced inside OneCycleLR's first step() call. Coercing here means a
+    # mis-typed config raises ValueError at build time, with a clear traceback.
+    max_lr_val = training.get("max_lr")
+
     return TrainingRunConfig(
         dataset=dataset,
         window_seconds=window_seconds,
         backbone=backbone_name,
         epochs=training["epochs"],
-        max_lr=training.get("max_lr"),
-        lr_grid=list(training["lr_grid"]),
+        max_lr=float(max_lr_val) if max_lr_val is not None else None,
+        lr_grid=[float(x) for x in training["lr_grid"]],
         effective_batch_size=training["effective_batch_size"],
         physical_batch_size=physical_bs,
         gradient_accumulation_steps=accum_steps,
-        betas=(training["betas"][0], training["betas"][1]),
-        eps=training["eps"],
-        weight_decay=training["weight_decay"],
-        one_cycle_pct_start=training["lr_scheduler"]["pct_start"],
+        betas=(float(training["betas"][0]), float(training["betas"][1])),
+        eps=float(training["eps"]),
+        weight_decay=float(training["weight_decay"]),
+        one_cycle_pct_start=float(training["lr_scheduler"]["pct_start"]),
         one_cycle_anneal_strategy=training["lr_scheduler"]["anneal_strategy"],
-        one_cycle_div_factor=training["lr_scheduler"]["div_factor"],
-        one_cycle_final_div_factor=training["lr_scheduler"]["final_div_factor"],
+        one_cycle_div_factor=float(training["lr_scheduler"]["div_factor"]),
+        one_cycle_final_div_factor=float(
+            training["lr_scheduler"]["final_div_factor"]
+        ),
         one_cycle_three_phase=training["lr_scheduler"].get("three_phase", False),
         epoch_1_unfrozen_layers=tuple(
             training["gradual_unfreezing_schedule"]["epoch_1_unfrozen_layers"]
@@ -762,11 +771,11 @@ def build_training_config(
         seed=cfg.get("seed", 42),
         full_determinism=determinism["hf_full_determinism"],
         fp16=training["fp16"],
-        fp16_weight_divergence_threshold=determinism[
-            "fp16_weight_divergence_threshold"
-        ],
-        masking_sentence_ratio=masking["sentence_ratio"],
-        masking_token_ratio=masking["token_ratio"],
+        fp16_weight_divergence_threshold=float(
+            determinism["fp16_weight_divergence_threshold"]
+        ),
+        masking_sentence_ratio=float(masking["sentence_ratio"]),
+        masking_token_ratio=float(masking["token_ratio"]),
     )
 
 

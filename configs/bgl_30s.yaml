@@ -50,7 +50,7 @@ training:
     pct_start: 0.3
     anneal_strategy: cos
     div_factor: 25.0
-    final_div_factor: 1.0e4
+    final_div_factor: 1.0e+4
     three_phase: false
   gradual_unfreezing_schedule:
     epoch_1_unfrozen_layers: [10, 11]

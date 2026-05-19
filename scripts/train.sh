@@ -64,6 +64,21 @@ export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export TOKENIZERS_PARALLELISM=false
 
+# ----- HuggingFace offline mode -----
+# Compute nodes on Compute Canada (Narval/Beluga/Cedar) have no outbound
+# internet. transformers.from_pretrained() tries to HEAD the model URL on
+# every call to check for updates, which fails on compute nodes even when
+# the model is fully cached locally. Forcing offline mode tells transformers
+# to read straight from the cache (~/.cache/huggingface/) without any network
+# round-trip. Pre-cache models on the login node before submitting:
+#   python -c "from transformers import AutoModelForMaskedLM, AutoTokenizer; \
+#     [AutoTokenizer.from_pretrained(m) for m in ['roberta-base', \
+#       'allenai/longformer-base-4096']]; \
+#     [AutoModelForMaskedLM.from_pretrained(m) for m in ['roberta-base', \
+#       'allenai/longformer-base-4096']]"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 cd "$SLURM_SUBMIT_DIR"
 
 # Sanity check: we're in the project root

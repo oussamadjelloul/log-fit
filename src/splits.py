@@ -34,11 +34,20 @@ WITHIN-FOLD DISJOINTNESS (enforced and tested):
 - train_normal ⊥ test_normal     (different partitions)
 - tune_normal ⊥ test_normal      (different partitions; tune from train_pool)
 
-GRACEFUL DEGRADATION (small pools — BGL subset case):
-- When `train_pool_normal < train_budget + tune_budget`: train takes
-  `min(budget, pool)`; tune takes `min(budget, residual)`. (Train-priority.)
-- When `anomaly_pool < tune_budget + test_budget`: tune takes
-  `min(budget, pool)`; test takes `min(budget, residual)`. (Tune-priority.)
+GRACEFUL DEGRADATION (small pools — HDFS subset case, D_NEW6.1):
+PROPORTIONAL split. When pool < sum of budgets, BOTH streams shrink by
+the budget ratio so neither is starved:
+- Normals (pool < train + tune):
+    effective_train = pool * train_budget // (train_budget + tune_budget)
+    effective_tune  = pool - effective_train
+- Anomalies (pool < tune + test):
+    effective_tune = pool * tune_budget // (tune_budget + test_budget)
+    effective_test = pool - effective_tune
+Initial v1.5 used stream-priority (train-priority for normals, tune-
+priority for anomalies); this left HDFS subset (698 anomalies < 1k tune
+budget) with zero test_anomaly per fold. Changed to proportional in
+v1.5.1 so both streams stay non-empty whenever both budgets > 0 and
+pool > 1.
 
 Reference: logfit-repro-decisions-v1.5.md D_NEW6; logfit-repro-spec-v1.5.md
 Component 1.7.
@@ -183,17 +192,22 @@ def _carve_train_and_tune_normals(
 ) -> tuple[list[Paragraph], list[Paragraph]]:
     """Sample disjoint train and tune normal sets from a single normal pool.
 
-    Seed-offset invariant (D_NEW6): train uses `seed + TRAIN_NORMAL_SEED_OFFSET`,
-    tune uses `seed + TUNE_NORMAL_SEED_OFFSET`. Changing `tune_budget` MUST
-    NOT change which IDs end up in train_sample for a given (seed, pool).
+    Seed-offset invariant (D_NEW6, holds in non-degraded regime): train uses
+    `seed + TRAIN_NORMAL_SEED_OFFSET`, tune uses `seed + TUNE_NORMAL_SEED_OFFSET`.
+    When `pool >= train_budget + tune_budget`, changing tune_budget MUST NOT
+    change which IDs end up in train_sample for a given (seed, pool).
 
     Disjointness within fold: tune is drawn from a fresh shuffle of the pool,
-    then filters out any IDs already in train_sample BEFORE taking the first
-    `tune_budget` items.
+    then filters out any IDs already in train_sample BEFORE taking its share.
 
-    Graceful degradation: when `pool < train_budget + tune_budget`, train
-    takes `min(budget, pool)`; tune takes `min(budget, pool - len(train))`.
-    Train-priority semantics.
+    Graceful degradation (D_NEW6.1): when `pool < train + tune`, BOTH
+    streams scale down by their budget ratio:
+        effective_train = pool * train_budget // (train_budget + tune_budget)
+        effective_tune  = pool - effective_train
+    In the degraded regime the seed-offset invariant no longer holds — both
+    sample sizes depend on both budgets — but the underlying shuffles still
+    use independent seeds and the result is deterministic in
+    (seed, pool, budgets).
     """
     if train_budget < 0 or tune_budget < 0:
         raise ValueError(
@@ -201,15 +215,24 @@ def _carve_train_and_tune_normals(
             f"got train={train_budget}, tune={tune_budget}"
         )
 
-    # Train: shuffle with train-specific seed, take first `train_budget`
+    # Proportional degradation when pool < total budget (D_NEW6.1).
+    pool_size = len(pool)
+    effective_train = train_budget
+    effective_tune = tune_budget
+    total_budget = train_budget + tune_budget
+    if pool_size < total_budget and total_budget > 0:
+        effective_train = pool_size * train_budget // total_budget
+        effective_tune = pool_size - effective_train
+
+    # Train: shuffle with train-specific seed, take first effective_train.
     train_shuffled = _shuffle_with_seed(pool, seed + TRAIN_NORMAL_SEED_OFFSET)
-    train_sample = train_shuffled[: min(train_budget, len(train_shuffled))]
+    train_sample = train_shuffled[:effective_train]
     train_ids = {p.paragraph_id for p in train_sample}
 
-    # Tune: shuffle independently, exclude train IDs, take first `tune_budget`
+    # Tune: shuffle independently, exclude train IDs, take first effective_tune.
     tune_shuffled = _shuffle_with_seed(pool, seed + TUNE_NORMAL_SEED_OFFSET)
     tune_candidates = [p for p in tune_shuffled if p.paragraph_id not in train_ids]
-    tune_sample = tune_candidates[: min(tune_budget, len(tune_candidates))]
+    tune_sample = tune_candidates[:effective_tune]
 
     return train_sample, tune_sample
 
@@ -226,16 +249,21 @@ def _carve_tune_and_test_anomalies(
     its own seed, producing cross-fold overlap E[overlap] ≈ K²/|pool|
     (e.g., 500 at the 2k pool / 1k budget scale per D14).
 
-    Seed-offset invariant (D_NEW6): tune uses TUNE_ANOMALY_SEED_OFFSET, test
-    uses TEST_ANOMALY_SEED_OFFSET. Changing one budget doesn't perturb the
-    other stream.
+    Seed-offset invariant (D_NEW6, holds in non-degraded regime): tune uses
+    TUNE_ANOMALY_SEED_OFFSET, test uses TEST_ANOMALY_SEED_OFFSET. When
+    `pool >= tune + test`, changing one budget doesn't perturb the other.
 
     Disjointness within fold: test filters out IDs already in this fold's
     tune_anomaly.
 
-    Graceful degradation: when `pool < tune_budget + test_budget`, tune
-    takes `min(budget, pool)`; test takes the residual.
-    Tune-priority semantics.
+    Graceful degradation (D_NEW6.1): when `pool < tune + test`, BOTH
+    streams scale down by their budget ratio:
+        effective_tune = pool * tune_budget // (tune_budget + test_budget)
+        effective_test = pool - effective_tune
+    In the degraded regime the seed-offset invariant no longer holds —
+    both sample sizes depend on both budgets — but the underlying shuffles
+    still use independent seeds and the result is deterministic in
+    (seed, pool, budgets).
     """
     if tune_budget < 0 or test_budget < 0:
         raise ValueError(
@@ -243,13 +271,22 @@ def _carve_tune_and_test_anomalies(
             f"got tune={tune_budget}, test={test_budget}"
         )
 
+    # Proportional degradation when pool < total budget (D_NEW6.1).
+    pool_size = len(pool)
+    effective_tune = tune_budget
+    effective_test = test_budget
+    total_budget = tune_budget + test_budget
+    if pool_size < total_budget and total_budget > 0:
+        effective_tune = pool_size * tune_budget // total_budget
+        effective_test = pool_size - effective_tune
+
     tune_shuffled = _shuffle_with_seed(pool, seed + TUNE_ANOMALY_SEED_OFFSET)
-    tune_sample = tune_shuffled[: min(tune_budget, len(tune_shuffled))]
+    tune_sample = tune_shuffled[:effective_tune]
     tune_ids = {p.paragraph_id for p in tune_sample}
 
     test_shuffled = _shuffle_with_seed(pool, seed + TEST_ANOMALY_SEED_OFFSET)
     test_candidates = [p for p in test_shuffled if p.paragraph_id not in tune_ids]
-    test_sample = test_candidates[: min(test_budget, len(test_candidates))]
+    test_sample = test_candidates[:effective_test]
 
     return tune_sample, test_sample
 

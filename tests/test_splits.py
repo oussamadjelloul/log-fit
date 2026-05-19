@@ -15,7 +15,9 @@ Mapping to spec-v1.5 Component 1.7 / decisions-v1.5 D_NEW6:
 - test_seed_offsets_independent_*          — D_NEW6 invariant (changing
                                               one budget MUST NOT shift
                                               another stream's IDs)
-- test_graceful_degradation_*              — BGL-subset case
+- test_graceful_degradation_*              — D_NEW6.1 proportional split
+- test_hdfs_subset_regression_v1_5_1       — regression guard for the
+                                              tune-priority bug (test_A=0)
 - test_persistence_roundtrip               — JSON schema
 """
 
@@ -200,34 +202,42 @@ class TestCarveTrainAndTuneNormals:
         assert len(train) == 40
         assert len(tune) == 20
 
-    def test_graceful_degradation_train_priority(self):
-        """When pool < train_budget + tune_budget, train takes its full
-        share (capped at pool size), tune gets the residual."""
-        # Pool = 50, budgets = 40 + 20 = 60. Train takes 40, tune takes 10.
+    def test_graceful_degradation_proportional_normals(self):
+        """D_NEW6.1: when pool < train + tune, scale BOTH proportionally.
+        Pool=50, budgets 40+20 (ratio 2:1) → train=33, tune=17 (full pool used)."""
         pool = [Paragraph(f"x_{i}", ["a"], 0) for i in range(50)]
         train, tune = _carve_train_and_tune_normals(
             pool=pool, train_budget=40, tune_budget=20, seed=42
         )
-        assert len(train) == 40
-        assert len(tune) == 10  # 50 - 40 = 10 left
+        # 50 * 40 // 60 = 33; 50 - 33 = 17
+        assert len(train) == 33
+        assert len(tune) == 17
+        # Full pool consumed
+        assert len(train) + len(tune) == 50
 
-    def test_train_consumes_full_pool_tune_empty(self):
-        """Pool = train_budget exactly → tune is empty."""
+    def test_pool_equals_train_budget_still_proportional(self):
+        """Even when pool == train_budget exactly, proportional split
+        still applies because pool < train + tune. Pool=40, budgets 40+20
+        → train=26, tune=14 (not train=40, tune=0)."""
         pool = [Paragraph(f"x_{i}", ["a"], 0) for i in range(40)]
         train, tune = _carve_train_and_tune_normals(
             pool=pool, train_budget=40, tune_budget=20, seed=42
         )
-        assert len(train) == 40
-        assert tune == []
+        # 40 * 40 // 60 = 26; 40 - 26 = 14
+        assert len(train) == 26
+        assert len(tune) == 14
 
-    def test_train_budget_exceeds_pool_train_takes_all(self):
-        """train_budget > pool size → train gets entire pool, tune empty."""
+    def test_train_budget_exceeds_pool_proportional(self):
+        """train_budget > pool size → proportional split still applies.
+        Pool=30, budgets 40+20 (ratio 2:1) → train=20, tune=10."""
         pool = [Paragraph(f"x_{i}", ["a"], 0) for i in range(30)]
         train, tune = _carve_train_and_tune_normals(
             pool=pool, train_budget=40, tune_budget=20, seed=42
         )
-        assert len(train) == 30
-        assert tune == []
+        # 30 * 40 // 60 = 20; 30 - 20 = 10
+        assert len(train) == 20
+        assert len(tune) == 10
+        assert len(train) + len(tune) == 30
 
     def test_zero_budgets_return_empty(self):
         pool = [Paragraph(f"x_{i}", ["a"], 0) for i in range(20)]
@@ -275,23 +285,28 @@ class TestCarveTuneAndTestAnomalies:
         assert len(tune) == 30
         assert len(test) == 40
 
-    def test_graceful_degradation_tune_priority(self):
-        """When pool < tune+test, tune takes full budget; test residual."""
-        # Pool = 40, budgets 30 + 30. Tune takes 30, test takes 10.
+    def test_graceful_degradation_proportional_anomalies(self):
+        """D_NEW6.1: when pool < tune + test, scale BOTH proportionally.
+        Pool=40, budgets 30+30 (equal) → tune=20, test=20 (50/50 split)."""
         pool = [Paragraph(f"a_{i}", ["a"], 1) for i in range(40)]
         tune, test = _carve_tune_and_test_anomalies(
             pool=pool, tune_budget=30, test_budget=30, seed=42
         )
-        assert len(tune) == 30
-        assert len(test) == 10
+        # 40 * 30 // 60 = 20; 40 - 20 = 20
+        assert len(tune) == 20
+        assert len(test) == 20
+        # Full pool used
+        assert len(tune) + len(test) == 40
 
-    def test_tune_consumes_full_pool_test_empty(self):
+    def test_pool_equals_tune_budget_still_proportional(self):
+        """Pool=30, budgets 30+30 → tune=15, test=15 (not tune=30, test=0)."""
         pool = [Paragraph(f"a_{i}", ["a"], 1) for i in range(30)]
         tune, test = _carve_tune_and_test_anomalies(
             pool=pool, tune_budget=30, test_budget=30, seed=42
         )
-        assert len(tune) == 30
-        assert test == []
+        # 30 * 30 // 60 = 15; 30 - 15 = 15
+        assert len(tune) == 15
+        assert len(test) == 15
 
     def test_zero_budgets_return_empty(self):
         pool = [Paragraph(f"a_{i}", ["a"], 1) for i in range(20)]
@@ -490,7 +505,9 @@ class TestWithinFoldDisjointness:
 
 class TestSeedOffsetInvariant:
     """Changing one stream's budget MUST NOT shift another stream's IDs for
-    fixed (seed, fold_id). The four distinct offsets guarantee this."""
+    fixed (seed, fold_id). The four distinct offsets guarantee this in the
+    NON-degraded regime; in degraded regime budgets become coupled by the
+    proportional split (D_NEW6.1)."""
 
     def test_tune_change_does_not_perturb_train_normal(self):
         ps = _make_paragraphs(1_000, 200)
@@ -544,32 +561,52 @@ class TestSeedOffsetInvariant:
 
 
 # ---------------------------------------------------------------------------
-# Graceful degradation (small-pool BGL subset case)
+# Graceful degradation (small-pool subset case) — D_NEW6.1 proportional
 # ---------------------------------------------------------------------------
 
 
 class TestGracefulDegradation:
-    def test_small_normal_pool_train_priority(self):
-        """600 normal / 5 folds → 480 normal per train pool. Train_budget
-        5000 caps at 480; tune gets 0 (train consumes all)."""
+    def test_small_normal_pool_proportional(self):
+        """D_NEW6.1: 600 normal / 5 folds → 480 normal per train pool.
+        Train_budget=5000, tune_budget=1000 (default). Proportional split:
+        train = 480*5000//6000 = 400; tune = 480-400 = 80."""
         ps = _make_paragraphs(600, 100)
         art = create_splits(ps)  # defaults: train=5k, tune_n=1k
         for fold in art.folds:
-            assert len(fold.train_normal_ids) == 480
-            assert fold.tune_normal_ids == []
+            assert len(fold.train_normal_ids) == 400
+            assert len(fold.tune_normal_ids) == 80
+            # Full pool used
+            assert len(fold.train_normal_ids) + len(fold.tune_normal_ids) == 480
 
-    def test_small_anomaly_pool_tune_priority(self):
-        """100 anomaly pool, budgets 1k+1k → tune gets 100, test gets 0."""
+    def test_small_anomaly_pool_proportional(self):
+        """D_NEW6.1: 100 anomaly pool, budgets 1k+1k → tune=50, test=50
+        (proportional 50/50, not tune=100/test=0)."""
         ps = _make_paragraphs(600, 100)
         art = create_splits(ps)
         for fold in art.folds:
-            assert len(fold.tune_anomaly_ids) == 100
-            assert fold.test_anomaly_ids == []
+            assert len(fold.tune_anomaly_ids) == 50
+            assert len(fold.test_anomaly_ids) == 50
+            assert len(fold.tune_anomaly_ids) + len(fold.test_anomaly_ids) == 100
+
+    def test_hdfs_subset_regression_v1_5_1(self):
+        """Regression guard: HDFS subset shape (14941 normal + 698 anomaly).
+        Under initial v1.5 tune-priority, this gave tune_A=698, test_A=0 —
+        broken evaluation. v1.5.1 proportional: tune=349, test=349."""
+        ps = _make_paragraphs(14_941, 698)
+        art = create_splits(ps)  # all defaults
+        for fold in art.folds:
+            assert len(fold.tune_anomaly_ids) == 349
+            assert len(fold.test_anomaly_ids) == 349
+            # Full pool used (no leakage, no fabrication)
+            assert (
+                len(fold.tune_anomaly_ids) + len(fold.test_anomaly_ids) == 698
+            )
+            # Within-fold disjoint
+            assert set(fold.tune_anomaly_ids).isdisjoint(set(fold.test_anomaly_ids))
 
     def test_partial_pool_proportional_normals(self):
-        """Pool 50, budgets 40+20 → train takes 40, tune takes 10."""
-        # 4-fold pool of 40 per fold (5 folds × 12 normals + 4-of-5 = 48 ≈ 40)
-        # Use a layout where train_pool = 50 exactly: 5 folds, normals 62 → ~50 per train pool
+        """Pool ~50, budgets 40+20 → train≈33, tune≈17 (proportional)."""
+        # 5 folds × 12-13 normals → 4-fold train pool is 49 or 50.
         ps = _make_paragraphs(62, 10)
         art = create_splits(
             ps,
@@ -579,11 +616,9 @@ class TestGracefulDegradation:
             tune_anomaly_per_fold=5,
             test_anomaly_per_fold=5,
         )
-        # Train pool sizes are roughly 50 (4 folds of 12-13 each)
         for fold in art.folds:
             assert len(fold.train_normal_ids) <= 40
-            # Some folds may get pool size = 49 or 50; the train+tune sum
-            # equals min(50, 60) = 50
+            # Sum equals pool size (49 or 50)
             assert len(fold.train_normal_ids) + len(fold.tune_normal_ids) <= 50
 
     def test_zero_anomaly_input_test_anomaly_empty(self):

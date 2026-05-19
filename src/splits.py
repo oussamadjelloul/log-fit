@@ -1,29 +1,53 @@
-"""5-fold cross-validation splits per spec D14.
+"""5-fold cross-validation splits — paper-faithful (v1.5 D_NEW6).
 
-Per D14:
-- 5-fold cross-validation with stratified test folds (preserving the
-  normal/anomaly ratio across folds).
-- Per-fold training-set sampling from the 4-fold train pool with
-  fold-specific seeds → cross-fold anomaly overlap, E[overlap] ~ 500 at
-  HDFS scale (pool size ~ 8K anomalies).
-- Per-fold budget: train_normal_per_fold + train_anomaly_per_fold
-  (default 25,000 + 2,000 per L21). If the train pool for a fold is
-  smaller than the budget, use the full pool (graceful degradation for
-  small datasets like BGL subsets).
+PARADIGM (v1.5 — replaces v1.4 Paradigm A):
+- NORMALS partitioned across N folds via stratified shuffle + round-robin.
+- ANOMALIES kept as a SINGLE pool, non-partitioned. Each fold samples
+  independently from the same pool with per-fold seeds → cross-fold anomaly
+  overlap E[overlap] ≈ 500 = 50% at the 2k pool / 1k budget scale (matches
+  D14 documentation, which v1.4's code failed to deliver).
+- Per-fold sampling uses four DISTINCT seed streams (offsets 0/2000/3000/
+  4000) so changing one budget does NOT ripple through the others. Tests
+  pin this invariant.
 
-Test sets are NOT sampled: each paragraph appears in exactly one test fold.
-This makes per-fold test metrics comparable and supports standard 5-fold CV
-F1/AUROC aggregation.
+PER-FOLD SCHEMA (5 ID lists, was 4 in v1.4):
+- train_normal_ids   ← 5,000 per L23 (was 25,000 default in v1.4)
+- tune_normal_ids    ← 1,000 per L24 (NEW v1.5)
+- tune_anomaly_ids   ← 1,000 per L24 (NEW v1.5)
+- test_normal_ids    ← fold's normal partition (5,000 at L21 scale)
+- test_anomaly_ids   ← 1,000 per L25 (was: fold's anomaly partition ~400)
 
-Output: splits.json with one record per fold containing four ID lists.
+REMOVED from v1.4: `train_anomaly_ids`. LogFiT trains on normals only;
+the field was unused by train.py and misleading. Per D_NEW6.
 
-Reference: logfit-repro-spec-v1.3.md D14; logfit-repro-decisions-v1.4.md
-D_NEW3 (Phase 1 paper-faithful).
+CROSS-FOLD PROPERTIES (verified by tests):
+- test_normal:   disjoint  (normal partition)
+- train_normal:  partial overlap (E[overlap] ≈ 938 at HDFS scale)
+- tune_normal:   partial overlap
+- tune_anomaly:  per-fold-shuffled subset of pool → E[overlap] ≈ 500
+- test_anomaly:  per-fold-shuffled subset of pool \\ tune_anomaly →
+                 E[overlap] ≈ 500
+
+WITHIN-FOLD DISJOINTNESS (enforced and tested):
+- train_normal ⊥ tune_normal     (tune drawn from pool \\ train_ids)
+- tune_anomaly ⊥ test_anomaly    (test drawn from pool \\ tune_ids)
+- train_normal ⊥ test_normal     (different partitions)
+- tune_normal ⊥ test_normal      (different partitions; tune from train_pool)
+
+GRACEFUL DEGRADATION (small pools — BGL subset case):
+- When `train_pool_normal < train_budget + tune_budget`: train takes
+  `min(budget, pool)`; tune takes `min(budget, residual)`. (Train-priority.)
+- When `anomaly_pool < tune_budget + test_budget`: tune takes
+  `min(budget, pool)`; test takes `min(budget, residual)`. (Tune-priority.)
+
+Reference: logfit-repro-decisions-v1.5.md D_NEW6; logfit-repro-spec-v1.5.md
+Component 1.7.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import random
 from dataclasses import asdict, dataclass, field
@@ -32,32 +56,57 @@ from pathlib import Path
 from src.types import Paragraph
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 DEFAULT_N_FOLDS = 5
-DEFAULT_TRAIN_NORMAL_PER_FOLD = 25_000
-DEFAULT_TRAIN_ANOMALY_PER_FOLD = 2_000
+
+# Paper §IV-A L23–L25 per-fold budgets at HDFS L21 allocation scale.
+DEFAULT_TRAIN_NORMAL_PER_FOLD = 5_000   # L23
+DEFAULT_TUNE_NORMAL_PER_FOLD = 1_000    # L24
+DEFAULT_TUNE_ANOMALY_PER_FOLD = 1_000   # L24
+DEFAULT_TEST_ANOMALY_PER_FOLD = 1_000   # L25
 DEFAULT_SEED = 42
+
+# Per-fold seed offsets keep the four sampling streams decoupled. Distinct
+# offsets are an explicit design choice (D_NEW6): changing one budget must
+# NOT shift another stream's IDs for fixed (seed, fold_id). Pinned by test.
+TRAIN_NORMAL_SEED_OFFSET = 0
+TUNE_NORMAL_SEED_OFFSET = 2_000
+TUNE_ANOMALY_SEED_OFFSET = 3_000
+TEST_ANOMALY_SEED_OFFSET = 4_000
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class FoldSplit:
-    """One fold of a k-fold cross-validation split."""
+    """One fold of a k-fold cross-validation split (v1.5 schema, 5 ID lists)."""
 
-    fold_id: int  # 0-indexed
+    fold_id: int                                                 # 0-indexed
+    seed: int = DEFAULT_SEED
     train_normal_ids: list[str] = field(default_factory=list)
-    train_anomaly_ids: list[str] = field(default_factory=list)
+    tune_normal_ids: list[str] = field(default_factory=list)
+    tune_anomaly_ids: list[str] = field(default_factory=list)
     test_normal_ids: list[str] = field(default_factory=list)
     test_anomaly_ids: list[str] = field(default_factory=list)
-    seed: int = DEFAULT_SEED
 
     def train_total(self) -> int:
-        return len(self.train_normal_ids) + len(self.train_anomaly_ids)
+        return len(self.train_normal_ids)
+
+    def tune_total(self) -> int:
+        return len(self.tune_normal_ids) + len(self.tune_anomaly_ids)
 
     def test_total(self) -> int:
         return len(self.test_normal_ids) + len(self.test_anomaly_ids)
 
-    def train_anomaly_rate(self) -> float:
-        total = self.train_total()
-        return len(self.train_anomaly_ids) / total if total > 0 else 0.0
+    def tune_anomaly_rate(self) -> float:
+        total = self.tune_total()
+        return len(self.tune_anomaly_ids) / total if total > 0 else 0.0
 
     def test_anomaly_rate(self) -> float:
         total = self.test_total()
@@ -70,7 +119,9 @@ class SplitsArtifact:
 
     n_folds: int
     train_normal_per_fold: int
-    train_anomaly_per_fold: int
+    tune_normal_per_fold: int
+    tune_anomaly_per_fold: int
+    test_anomaly_per_fold: int
     seed: int
     total_paragraphs: int
     total_normal: int
@@ -79,72 +130,128 @@ class SplitsArtifact:
 
 
 # ---------------------------------------------------------------------------
-# Stratified fold assignment
+# Stratified fold assignment — NORMALS ONLY (Paradigm B)
 # ---------------------------------------------------------------------------
 
 
-def stratified_fold_assignment(
+def stratified_normal_fold_assignment(
     paragraphs: list[Paragraph],
     n_folds: int = DEFAULT_N_FOLDS,
     seed: int = DEFAULT_SEED,
-) -> list[int]:
-    """Return a list of length len(paragraphs) where each entry is the
-    fold index (0..n_folds-1) for the corresponding paragraph.
+) -> dict[int, int]:
+    """Return a dict mapping `paragraph-list-index -> fold_id` for NORMALS ONLY.
 
-    The assignment is stratified by `label`: normal and anomaly paragraphs
-    are independently shuffled (using `seed`) and round-robin assigned to
-    folds, so each fold has approximately the same normal/anomaly ratio.
+    Anomaly indices are NOT in the returned dict — the anomaly pool stays
+    whole and is sampled per-fold downstream (Paradigm B / D14).
 
-    Deterministic given the same seed and the same paragraph order.
+    Deterministic given the same seed and paragraph order.
     """
     if n_folds < 2:
         raise ValueError(f"n_folds must be >= 2, got {n_folds}")
     if not paragraphs:
-        return []
+        return {}
 
     normal_idxs = [i for i, p in enumerate(paragraphs) if p.label == 0]
-    anomaly_idxs = [i for i, p in enumerate(paragraphs) if p.label == 1]
 
     rng = random.Random(seed)
     rng.shuffle(normal_idxs)
-    rng.shuffle(anomaly_idxs)
 
-    assignment = [-1] * len(paragraphs)
+    assignment: dict[int, int] = {}
     for slot, idx in enumerate(normal_idxs):
         assignment[idx] = slot % n_folds
-    for slot, idx in enumerate(anomaly_idxs):
-        assignment[idx] = slot % n_folds
-
-    # Sanity check: no -1 left
-    if -1 in assignment:
-        missing = sum(1 for a in assignment if a == -1)
-        raise ValueError(
-            f"BUG: {missing} paragraphs not assigned to any fold. "
-            f"Check that all paragraphs have label in {{0, 1}}."
-        )
-
     return assignment
 
 
 # ---------------------------------------------------------------------------
-# Per-fold sampling
+# Sampling primitives
 # ---------------------------------------------------------------------------
 
 
-def _sample_or_full(
-    items: list[Paragraph],
-    n: int,
-    seed: int,
-) -> list[Paragraph]:
-    """Return up to `n` items sampled deterministically from `items`.
-
-    If `len(items) <= n`, returns all items unchanged (no sampling).
-    Otherwise samples without replacement using a seeded RNG.
-    """
-    if len(items) <= n:
-        return items
+def _shuffle_with_seed(items: list, seed: int) -> list:
+    """Return a NEW list, shuffled deterministically. Doesn't mutate input."""
+    out = list(items)
     rng = random.Random(seed)
-    return rng.sample(items, n)
+    rng.shuffle(out)
+    return out
+
+
+def _carve_train_and_tune_normals(
+    pool: list[Paragraph],
+    train_budget: int,
+    tune_budget: int,
+    seed: int,
+) -> tuple[list[Paragraph], list[Paragraph]]:
+    """Sample disjoint train and tune normal sets from a single normal pool.
+
+    Seed-offset invariant (D_NEW6): train uses `seed + TRAIN_NORMAL_SEED_OFFSET`,
+    tune uses `seed + TUNE_NORMAL_SEED_OFFSET`. Changing `tune_budget` MUST
+    NOT change which IDs end up in train_sample for a given (seed, pool).
+
+    Disjointness within fold: tune is drawn from a fresh shuffle of the pool,
+    then filters out any IDs already in train_sample BEFORE taking the first
+    `tune_budget` items.
+
+    Graceful degradation: when `pool < train_budget + tune_budget`, train
+    takes `min(budget, pool)`; tune takes `min(budget, pool - len(train))`.
+    Train-priority semantics.
+    """
+    if train_budget < 0 or tune_budget < 0:
+        raise ValueError(
+            f"budgets must be non-negative; "
+            f"got train={train_budget}, tune={tune_budget}"
+        )
+
+    # Train: shuffle with train-specific seed, take first `train_budget`
+    train_shuffled = _shuffle_with_seed(pool, seed + TRAIN_NORMAL_SEED_OFFSET)
+    train_sample = train_shuffled[: min(train_budget, len(train_shuffled))]
+    train_ids = {p.paragraph_id for p in train_sample}
+
+    # Tune: shuffle independently, exclude train IDs, take first `tune_budget`
+    tune_shuffled = _shuffle_with_seed(pool, seed + TUNE_NORMAL_SEED_OFFSET)
+    tune_candidates = [p for p in tune_shuffled if p.paragraph_id not in train_ids]
+    tune_sample = tune_candidates[: min(tune_budget, len(tune_candidates))]
+
+    return train_sample, tune_sample
+
+
+def _carve_tune_and_test_anomalies(
+    pool: list[Paragraph],
+    tune_budget: int,
+    test_budget: int,
+    seed: int,
+) -> tuple[list[Paragraph], list[Paragraph]]:
+    """Sample disjoint tune_anomaly and test_anomaly sets from the anomaly pool.
+
+    Pool is NOT partitioned — every fold samples from the same 2k pool with
+    its own seed, producing cross-fold overlap E[overlap] ≈ K²/|pool|
+    (e.g., 500 at the 2k pool / 1k budget scale per D14).
+
+    Seed-offset invariant (D_NEW6): tune uses TUNE_ANOMALY_SEED_OFFSET, test
+    uses TEST_ANOMALY_SEED_OFFSET. Changing one budget doesn't perturb the
+    other stream.
+
+    Disjointness within fold: test filters out IDs already in this fold's
+    tune_anomaly.
+
+    Graceful degradation: when `pool < tune_budget + test_budget`, tune
+    takes `min(budget, pool)`; test takes the residual.
+    Tune-priority semantics.
+    """
+    if tune_budget < 0 or test_budget < 0:
+        raise ValueError(
+            f"budgets must be non-negative; "
+            f"got tune={tune_budget}, test={test_budget}"
+        )
+
+    tune_shuffled = _shuffle_with_seed(pool, seed + TUNE_ANOMALY_SEED_OFFSET)
+    tune_sample = tune_shuffled[: min(tune_budget, len(tune_shuffled))]
+    tune_ids = {p.paragraph_id for p in tune_sample}
+
+    test_shuffled = _shuffle_with_seed(pool, seed + TEST_ANOMALY_SEED_OFFSET)
+    test_candidates = [p for p in test_shuffled if p.paragraph_id not in tune_ids]
+    test_sample = test_candidates[: min(test_budget, len(test_candidates))]
+
+    return tune_sample, test_sample
 
 
 # ---------------------------------------------------------------------------
@@ -156,79 +263,91 @@ def create_splits(
     paragraphs: list[Paragraph],
     n_folds: int = DEFAULT_N_FOLDS,
     train_normal_per_fold: int = DEFAULT_TRAIN_NORMAL_PER_FOLD,
-    train_anomaly_per_fold: int = DEFAULT_TRAIN_ANOMALY_PER_FOLD,
+    tune_normal_per_fold: int = DEFAULT_TUNE_NORMAL_PER_FOLD,
+    tune_anomaly_per_fold: int = DEFAULT_TUNE_ANOMALY_PER_FOLD,
+    test_anomaly_per_fold: int = DEFAULT_TEST_ANOMALY_PER_FOLD,
     seed: int = DEFAULT_SEED,
 ) -> SplitsArtifact:
-    """Build n_folds stratified train/test splits.
+    """Build n_folds stratified train/tune/test splits — Paradigm B (D_NEW6).
 
     Algorithm:
-    1. Stratified fold assignment: each paragraph belongs to exactly one
-       test fold (preserving anomaly rate per fold).
-    2. For each fold k:
-       - test_set := paragraphs assigned to fold k (full set, no sampling)
-       - train_pool := paragraphs assigned to any other fold
-       - train_normal := sample up to `train_normal_per_fold` from the
-         normal subset of train_pool, with seed = seed + k
-       - train_anomaly := sample up to `train_anomaly_per_fold` from the
-         anomaly subset of train_pool, with seed = seed + k + 1000
+    1. Partition NORMALS into n_folds via stratified round-robin (seed).
+    2. Anomalies stay as a single pool.
+    3. For each fold k (with `fold_seed = seed + k`):
+       - `test_normal := fold_k's normal partition` (deterministic, full set)
+       - From `train_pool := union of other folds' normal partitions`:
+           - sample `train_normal` (≤ train_budget) using TRAIN seed offset
+           - sample `tune_normal`  (≤ tune_budget)  using TUNE_NORMAL offset,
+             excluding train_normal IDs
+       - From the anomaly pool:
+           - sample `tune_anomaly` (≤ tune_budget) using TUNE_ANOMALY offset
+           - sample `test_anomaly` (≤ test_budget) using TEST_ANOMALY offset,
+             excluding tune_anomaly IDs
 
-    The per-fold seeds for normal vs anomaly sampling are offset (`k` vs
-    `k + 1000`) so the anomaly stream is not entangled with the normal
-    stream when one of them gets re-budgeted in a future config change.
+    The four distinct seed offsets keep streams independent (test:
+    `test_tune_carve_does_not_perturb_train_carve`).
     """
     if not paragraphs:
         raise ValueError("paragraphs is empty")
 
-    assignment = stratified_fold_assignment(paragraphs, n_folds, seed)
+    normal_assignment = stratified_normal_fold_assignment(paragraphs, n_folds, seed)
 
-    # Pre-group paragraphs by fold and label for efficient lookup
-    paragraphs_by_fold: list[list[Paragraph]] = [[] for _ in range(n_folds)]
+    normals_by_fold: list[list[Paragraph]] = [[] for _ in range(n_folds)]
     for i, p in enumerate(paragraphs):
-        paragraphs_by_fold[assignment[i]].append(p)
+        if p.label == 0:
+            normals_by_fold[normal_assignment[i]].append(p)
+
+    anomaly_pool: list[Paragraph] = [p for p in paragraphs if p.label == 1]
 
     folds: list[FoldSplit] = []
     for k in range(n_folds):
-        test_set = paragraphs_by_fold[k]
-        test_normal = [p for p in test_set if p.label == 0]
-        test_anomaly = [p for p in test_set if p.label == 1]
+        fold_seed = seed + k
 
-        train_pool: list[Paragraph] = []
+        # Normals
+        test_normal_paragraphs = normals_by_fold[k]
+        train_pool_normal: list[Paragraph] = []
         for other_k in range(n_folds):
             if other_k == k:
                 continue
-            train_pool.extend(paragraphs_by_fold[other_k])
+            train_pool_normal.extend(normals_by_fold[other_k])
 
-        train_normal_pool = [p for p in train_pool if p.label == 0]
-        train_anomaly_pool = [p for p in train_pool if p.label == 1]
-
-        # D14: per-fold seed offset for the anomaly stream creates the
-        # cross-fold anomaly overlap pattern (E[overlap] ~ 500 at HDFS scale).
-        train_normal_sample = _sample_or_full(
-            train_normal_pool, train_normal_per_fold, seed=seed + k
+        train_normal_sample, tune_normal_sample = _carve_train_and_tune_normals(
+            pool=train_pool_normal,
+            train_budget=train_normal_per_fold,
+            tune_budget=tune_normal_per_fold,
+            seed=fold_seed,
         )
-        train_anomaly_sample = _sample_or_full(
-            train_anomaly_pool, train_anomaly_per_fold, seed=seed + k + 1000
+
+        # Anomalies (non-partitioned pool, per-fold sampling)
+        tune_anomaly_sample, test_anomaly_sample = _carve_tune_and_test_anomalies(
+            pool=anomaly_pool,
+            tune_budget=tune_anomaly_per_fold,
+            test_budget=test_anomaly_per_fold,
+            seed=fold_seed,
         )
 
         folds.append(
             FoldSplit(
                 fold_id=k,
+                seed=fold_seed,
                 train_normal_ids=[p.paragraph_id for p in train_normal_sample],
-                train_anomaly_ids=[p.paragraph_id for p in train_anomaly_sample],
-                test_normal_ids=[p.paragraph_id for p in test_normal],
-                test_anomaly_ids=[p.paragraph_id for p in test_anomaly],
-                seed=seed + k,
+                tune_normal_ids=[p.paragraph_id for p in tune_normal_sample],
+                tune_anomaly_ids=[p.paragraph_id for p in tune_anomaly_sample],
+                test_normal_ids=[p.paragraph_id for p in test_normal_paragraphs],
+                test_anomaly_ids=[p.paragraph_id for p in test_anomaly_sample],
             )
         )
 
     return SplitsArtifact(
         n_folds=n_folds,
         train_normal_per_fold=train_normal_per_fold,
-        train_anomaly_per_fold=train_anomaly_per_fold,
+        tune_normal_per_fold=tune_normal_per_fold,
+        tune_anomaly_per_fold=tune_anomaly_per_fold,
+        test_anomaly_per_fold=test_anomaly_per_fold,
         seed=seed,
         total_paragraphs=len(paragraphs),
         total_normal=sum(1 for p in paragraphs if p.label == 0),
-        total_anomaly=sum(1 for p in paragraphs if p.label == 1),
+        total_anomaly=len(anomaly_pool),
         folds=folds,
     )
 
@@ -264,7 +383,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Build 5-fold stratified CV splits per spec D14."
+        description="Build 5-fold stratified CV splits per paper §IV-A (v1.5 D_NEW6)."
     )
     parser.add_argument(
         "--paragraphs-pkl",
@@ -285,9 +404,19 @@ def main():
         default=DEFAULT_TRAIN_NORMAL_PER_FOLD,
     )
     parser.add_argument(
-        "--train-anomaly-per-fold",
+        "--tune-normal-per-fold",
         type=int,
-        default=DEFAULT_TRAIN_ANOMALY_PER_FOLD,
+        default=DEFAULT_TUNE_NORMAL_PER_FOLD,
+    )
+    parser.add_argument(
+        "--tune-anomaly-per-fold",
+        type=int,
+        default=DEFAULT_TUNE_ANOMALY_PER_FOLD,
+    )
+    parser.add_argument(
+        "--test-anomaly-per-fold",
+        type=int,
+        default=DEFAULT_TEST_ANOMALY_PER_FOLD,
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = parser.parse_args()
@@ -299,7 +428,9 @@ def main():
         paragraphs,
         n_folds=args.n_folds,
         train_normal_per_fold=args.train_normal_per_fold,
-        train_anomaly_per_fold=args.train_anomaly_per_fold,
+        tune_normal_per_fold=args.tune_normal_per_fold,
+        tune_anomaly_per_fold=args.tune_anomaly_per_fold,
+        test_anomaly_per_fold=args.test_anomaly_per_fold,
         seed=args.seed,
     )
 
@@ -310,23 +441,26 @@ def main():
     )
     save_splits(artifact, output_path)
 
-    print(f"\nSplits created ({artifact.n_folds}-fold CV).")
+    print(f"\nSplits created ({artifact.n_folds}-fold CV, Paradigm B / v1.5).")
     print(
         f"  Total paragraphs: {artifact.total_paragraphs:,} "
         f"(normal={artifact.total_normal:,}, "
         f"anomaly={artifact.total_anomaly:,})"
     )
+    print(
+        f"  Per-fold budgets: train_normal={artifact.train_normal_per_fold:,}, "
+        f"tune_normal={artifact.tune_normal_per_fold:,}, "
+        f"tune_anomaly={artifact.tune_anomaly_per_fold:,}, "
+        f"test_anomaly={artifact.test_anomaly_per_fold:,}"
+    )
     for fold in artifact.folds:
         print(
             f"  Fold {fold.fold_id}: "
-            f"train={fold.train_total():,} "
-            f"(N={len(fold.train_normal_ids):,}, "
-            f"A={len(fold.train_anomaly_ids):,}, "
-            f"rate={fold.train_anomaly_rate()*100:.2f}%) / "
-            f"test={fold.test_total():,} "
-            f"(N={len(fold.test_normal_ids):,}, "
-            f"A={len(fold.test_anomaly_ids):,}, "
-            f"rate={fold.test_anomaly_rate()*100:.2f}%)"
+            f"train_N={len(fold.train_normal_ids):,}  "
+            f"tune_N={len(fold.tune_normal_ids):,}  "
+            f"tune_A={len(fold.tune_anomaly_ids):,}  "
+            f"test_N={len(fold.test_normal_ids):,}  "
+            f"test_A={len(fold.test_anomaly_ids):,}"
         )
     print(f"  Wrote {output_path}")
 

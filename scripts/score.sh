@@ -94,10 +94,37 @@ FOLD_IDX="${SLURM_ARRAY_TASK_ID:-0}"
 # Substitute {FOLD_IDX} -> 0/1/2/3/4 in the model template
 MODEL_PATH="${MODEL_TEMPLATE//\{FOLD_IDX\}/$FOLD_IDX}"
 
+# Defensive recovery: common submission typo leaves trailing punctuation,
+# e.g. .../final_model)}. Also allow resolving .../final_model -> parent dir
+# when HF artifacts are saved directly in fold_<k>/.
 if [ ! -e "$MODEL_PATH" ]; then
-    echo "[score.sh] ERROR: model path does not exist: $MODEL_PATH"
-    echo "[score.sh] (Template was: $MODEL_TEMPLATE)"
-    exit 1
+    RAW_MODEL_PATH="$MODEL_PATH"
+    CLEAN_MODEL_PATH="$MODEL_PATH"
+
+    # Strip trailing punctuation often introduced by copy/paste/quoting mistakes.
+    while [[ "$CLEAN_MODEL_PATH" =~ [\}\)\]"\']$ ]]; do
+        CLEAN_MODEL_PATH="${CLEAN_MODEL_PATH%?}"
+    done
+
+    if [ -e "$CLEAN_MODEL_PATH" ]; then
+        MODEL_PATH="$CLEAN_MODEL_PATH"
+        echo "[score.sh] WARN: model path fixed by trimming trailing punctuation"
+        echo "[score.sh]       from: $RAW_MODEL_PATH"
+        echo "[score.sh]         to: $MODEL_PATH"
+    elif [[ "$CLEAN_MODEL_PATH" == */final_model ]] && [ -d "${CLEAN_MODEL_PATH%/final_model}" ]; then
+        MODEL_PATH="${CLEAN_MODEL_PATH%/final_model}"
+        echo "[score.sh] WARN: model leaf '/final_model' not found; using fold directory"
+        echo "[score.sh]       from: $RAW_MODEL_PATH"
+        echo "[score.sh]         to: $MODEL_PATH"
+    else
+        echo "[score.sh] ERROR: model path does not exist: $RAW_MODEL_PATH"
+        echo "[score.sh] (Template was: $MODEL_TEMPLATE)"
+        echo "[score.sh] Tried cleaned candidate: $CLEAN_MODEL_PATH"
+        if [[ "$CLEAN_MODEL_PATH" == */final_model ]]; then
+            echo "[score.sh] Tried fold-dir candidate: ${CLEAN_MODEL_PATH%/final_model}"
+        fi
+        exit 1
+    fi
 fi
 
 # Per-fold output directory

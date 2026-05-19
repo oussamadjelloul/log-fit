@@ -39,6 +39,7 @@ training:
   epochs: 3                                # HDFS [D1]
   max_lr: null                              # populated by D2 grid
   lr_grid: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4]
+  backbone: roberta-base                   # Phase 1 paper-faithful per D_NEW3 (v1.4 rule would route to Longformer)
   effective_batch_size: 8                  # RoBERTa expected for HDFS [D3]
   optimizer: adamw
   betas: [0.9, 0.99]

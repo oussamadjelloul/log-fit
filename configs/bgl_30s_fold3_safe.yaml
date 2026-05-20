@@ -1,0 +1,81 @@
+# BGL 30-second window run configuration
+# Reference: logfit-repro-spec-v1.2.md Component 10
+# Variability test enabled per paper Table VII (BGL only).
+
+dataset: bgl
+window_seconds: 30
+seed: 42
+
+sample_budget:
+  normal: 25000
+  anomaly: 2000
+
+cv:
+  folds: 5
+  per_fold_train_normal: 5000
+  per_fold_tune_normal: 1000
+  per_fold_tune_anomaly: 1000
+  per_fold_test_normal: 5000
+  per_fold_test_anomaly: 1000
+  anomaly_partition_strategy: per_fold_shuffle
+
+backbone:
+  selection_quantile: 0.8
+  threshold_words: 512
+  roberta_id: roberta-base
+  longformer_id: allenai/longformer-base-4096
+
+token_length_gate:
+  flag_threshold_p95_over_limit: true
+  hard_fail_max_over_5x_limit: true
+  longformer_attention_window_check: true
+
+masking:
+  sentence_ratio: 0.5
+  token_ratio: 0.8
+
+training:
+  framework: huggingface_trainer
+  transformers_version: 4.45.0
+  epochs: 5
+  max_lr: 1.0e-4
+  lr_grid: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4]
+  backbone: allenai/longformer-base-4096   # Phase 1 paper-faithful per D_NEW3
+  effective_batch_size: 8                  # may switch to 2 if Longformer selected
+  optimizer: adamw
+  betas: [0.9, 0.99]
+  eps: 1.0e-5
+  weight_decay: 0.01
+  lr_scheduler:
+    type: torch_one_cycle_lr
+    pct_start: 0.3
+    anneal_strategy: cos
+    div_factor: 25.0
+    final_div_factor: 1.0e+4
+    three_phase: false
+  gradual_unfreezing_schedule:
+    epoch_1_unfrozen_layers: [10, 11]
+    epoch_2_unfrozen_layers: [8, 9, 10, 11]
+    epoch_3_plus_unfrozen_layers: all
+    embeddings_frozen_until_epoch: 2
+  fp16: true
+
+determinism:
+  python_hash_seed: 0
+  torch_deterministic_algorithms: true
+  cublas_workspace_config: ":4096:8"
+  hf_full_determinism: true
+  fp16_weight_divergence_threshold: 1.0e-4
+
+inference:
+  topk_grid: [5, 9, 12]
+  threshold_grid_size: 3
+  global_seed: 42
+
+# Variability test enabled — BGL only, all windows; paper Table VII reports 30s
+variability:
+  enabled: true
+  top_n_verbs: 10                          # [D13] paper §V says "top 10"
+  lemma_strategy: first_synset_first_single_word_lemma   # [D17 v1.2 — multi-word filter]
+  substitution_scope: exact_token_match    # [D18]
+  preserve_whitespace: true                # [T4 v1.2]

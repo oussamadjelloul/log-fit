@@ -12,6 +12,9 @@ v1.5 changes:
 - ParagraphScore.topk_accuracies: dict[int, float] -> list[TopKAccuracyRecord].
 - ParagraphScore gains `n_masked_total` and `n_passes` audit fields.
 - SplitScores gains `n_passes` (mirror at split level for downstream consumers).
+- TuningCell gains `tp`, `fp`, `tn`, `fn` audit fields (default 0) so the
+  tune-set confusion matrix is preserved in tuning_grid.json artifacts.
+  Backward-compatible: existing callers that don't supply these get zeros.
 
 v1.3 changes:
 - DropCounters: split `singleton_window` into `singleton_window_normal` and
@@ -192,12 +195,24 @@ class SplitScores:
 
 @dataclass
 class TuningCell:
+    """One (top_k, threshold) cell evaluated on the tune set.
+
+    v1.5 audit fields (tp/fp/tn/fn) added with default 0 for backward
+    compatibility — they preserve the tune-set confusion matrix in the
+    tuning_grid.json artifact so evaluate.py and the dissertation report
+    can audit how the best (K, θ) was chosen.
+    """
+
     top_k: int
     threshold: float
     precision: float
     recall: float
     f1: float
     specificity: float
+    tp: int = 0
+    fp: int = 0
+    tn: int = 0
+    fn: int = 0
 
 
 @dataclass

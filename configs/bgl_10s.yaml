@@ -36,12 +36,12 @@ masking:
 training:
   framework: huggingface_trainer
   transformers_version: 4.45.0
-  epochs: 5                                # BGL/TB [D1]
-  max_lr: null
+  epochs: 5 # BGL/TB [D1]
+  max_lr: 1.0e-4
   lr_grid: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4]
-  backbone: roberta-base                   # Phase 1 paper-faithful per D_NEW3 (10s windows fit RoBERTa per existing comment; verify post-prep)
-  effective_batch_size: 8                  # likely RoBERTa for 10s windows; verified post-prep
-  optimizer: adamw
+  backbone: roberta-base # Phase 1 paper-faithful per D_NEW3 (10s windows fit RoBERTa per existing comment; verify post-prep)
+  effective_batch_size: 8 # likely RoBERTa for 10s windows; verified post-prep
+  optimizer: adam
   betas: [0.9, 0.99]
   eps: 1.0e-5
   weight_decay: 0.01
@@ -62,7 +62,7 @@ training:
 determinism:
   python_hash_seed: 0
   torch_deterministic_algorithms: true
-  cublas_workspace_config: ":4096:8"
+  cublas_workspace_config: ':4096:8'
   hf_full_determinism: true
   fp16_weight_divergence_threshold: 1.0e-4
 

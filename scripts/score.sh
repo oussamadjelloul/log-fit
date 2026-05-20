@@ -65,6 +65,13 @@ MODEL_TEMPLATE="${4:?missing model template (must contain literal {FOLD_IDX})}"
 OUTPUT_ROOT="${5:?missing output_root}"
 BACKBONE_DECISION_PATH="${6:-}"   # optional
 
+# ----- optional env-var overrides -----
+# N_PASSES: D_NEW8 (v1.5) — number of independent mask draws per paragraph.
+# Default 1 = paper-faithful single pass. Use N_PASSES=5 (or any R>=2) to
+# reduce per-paragraph topk-accuracy variance at R*compute cost. Cross-run
+# determinism preserved (each pass uses seed = base_seed + pass_idx).
+N_PASSES="${N_PASSES:-1}"
+
 # ----- environment: use the project's canonical activation script -----
 # Mirrors the interactive setup; guarantees pyarrow visibility (via the
 # arrow/24.0.0 module's PYTHONPATH) and venv state regardless of which
@@ -155,6 +162,7 @@ echo "  model:         $MODEL_PATH"
 echo "  output:        $PER_FOLD_OUTPUT"
 echo "  decision:      ${BACKBONE_DECISION_PATH:-<none — YAML default>}"
 echo "  splits-scored: tune + test (--split both)"
+echo "  n_passes:      $N_PASSES"
 echo "  job_id:        ${SLURM_JOB_ID:-N/A}"
 echo "  array_job:     ${SLURM_ARRAY_JOB_ID:-N/A}"
 echo "  task_id:       ${SLURM_ARRAY_TASK_ID:-N/A}"
@@ -172,6 +180,7 @@ python -m src.score \
     --model "$MODEL_PATH" \
     --output "$PER_FOLD_OUTPUT" \
     --split both \
+    --n-passes "$N_PASSES" \
     "${EXTRA_ARGS[@]}"
 
 echo "================================================================"

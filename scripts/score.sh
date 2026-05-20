@@ -102,8 +102,18 @@ if [ ! -e "$MODEL_PATH" ]; then
     CLEAN_MODEL_PATH="$MODEL_PATH"
 
     # Strip trailing punctuation often introduced by copy/paste/quoting mistakes.
-    while [[ "$CLEAN_MODEL_PATH" =~ [\}\)\]"\']$ ]]; do
-        CLEAN_MODEL_PATH="${CLEAN_MODEL_PATH%?}"
+    # Uses a case statement on the last character (each branch is single-quoted
+    # so bash never reinterprets the chars) — robust against the quoting pitfalls
+    # that broke the previous [[ =~ regex ]] form.
+    while [ -n "$CLEAN_MODEL_PATH" ]; do
+        case "${CLEAN_MODEL_PATH: -1}" in
+            ')'|'}'|']'|'"'|"'")
+                CLEAN_MODEL_PATH="${CLEAN_MODEL_PATH%?}"
+                ;;
+            *)
+                break
+                ;;
+        esac
     done
 
     if [ -e "$CLEAN_MODEL_PATH" ]; then

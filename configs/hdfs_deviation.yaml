@@ -67,7 +67,7 @@ determinism:
   fp16_weight_divergence_threshold: 1.0e-4 # [Q7]
 
 inference:
-  topk_grid: [1, 2, 3, 5, 9, 12]
+  topk_grid: [5, 9, 12]
   threshold_grid_size: 3
   global_seed: 42
 

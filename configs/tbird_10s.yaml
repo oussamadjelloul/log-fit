@@ -25,7 +25,7 @@ cv:
 backbone:
   selection_quantile: 0.8
   threshold_words: 512
-  roberta_id: roberta-base
+  roberta_id: allenai/longformer-base-4096
   longformer_id: allenai/longformer-base-4096
 
 token_length_gate:
@@ -43,8 +43,8 @@ training:
   epochs: 5
   max_lr: null
   lr_grid: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4]
-  backbone: roberta-base                   # Phase 1 paper-faithful per D_NEW3 (10s windows fit RoBERTa per existing comment; verify post-prep)
-  effective_batch_size: 8                  # short windows likely RoBERTa
+  backbone: allenai/longformer-base-4096 # Phase 1 paper-faithful per D_NEW3 (10s windows fit RoBERTa per existing comment; verify post-prep)
+  effective_batch_size: 8 # short windows likely RoBERTa
   optimizer: adamw
   betas: [0.9, 0.99]
   eps: 1.0e-5
@@ -66,7 +66,7 @@ training:
 determinism:
   python_hash_seed: 0
   torch_deterministic_algorithms: true
-  cublas_workspace_config: ":4096:8"
+  cublas_workspace_config: ':4096:8'
   hf_full_determinism: true
   fp16_weight_divergence_threshold: 1.0e-4
 
@@ -76,4 +76,4 @@ inference:
   global_seed: 42
 
 variability:
-  enabled: false   # paper variability test is BGL only
+  enabled: false # paper variability test is BGL only

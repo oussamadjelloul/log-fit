@@ -1,7 +1,7 @@
 # HDFS run configuration
 # Reference: logfit-repro-spec-v1.2.md Component 10
 
-dataset: hdfs
+dataset: hdfs_diviation_parameters
 window_seconds: null # HDFS uses block_id grouping, not time windows
 seed: 42
 

@@ -151,6 +151,40 @@ def _build_threshold_grid(
     return [lower + step * i for i in range(n_thresholds)]
 
 
+def _build_extended_threshold_grid(train_top1_acc: float) -> list[float]:
+    """Extended diagnostic threshold grid (NOT paper-faithful).
+
+    Returns linspace(max(0, top1 - 0.05), min(0.995, top1 + 0.05), 5).
+    Extends the paper §III-C grid upward to capture operating points with
+    threshold > train_top1_acc — motivated by the paper grid being upper-
+    boundary-selected (best θ == train_top1_acc) in all folds, which
+    indicates the F1 optimum lies above the paper-prescribed range.
+
+    Differences from paper grid:
+      - upper bound: train_top1_acc + 0.05  (paper: train_top1_acc)
+      - lower bound: train_top1_acc - 0.05  (paper: train_top1_acc - 0.1)
+      - n_thresholds: 5  (paper: 3)
+      - safety cap at 0.995 to prevent θ -> 1.0 degeneracy (every imperfect
+        paragraph flagged anomaly).
+
+    Disclose as a documented deviation from §III-C; use for diagnostic /
+    ablation runs, not as the reproduction-claim threshold.
+    """
+    if not (0.0 <= train_top1_acc <= 1.0):
+        raise ValueError(
+            f"train_top1_acc must be in [0, 1], got {train_top1_acc}"
+        )
+    lower = max(0.0, train_top1_acc - 0.05)
+    upper = min(0.995, train_top1_acc + 0.05)
+    n = 5
+    if upper <= lower:
+        # Degenerate when train_top1_acc is at/above 0.995: all 5 points
+        # would collapse. Return the single point at upper for sanity.
+        return [upper]
+    step = (upper - lower) / (n - 1)
+    return [lower + step * i for i in range(n)]
+
+
 def _topk_accuracy_for_paragraph(
     score: ParagraphScore, top_k: int
 ) -> float:
@@ -284,6 +318,7 @@ def tune_threshold(
     topk_grid: list[int] | None = None,
     n_thresholds: int = DEFAULT_N_THRESHOLDS,
     threshold_delta: float = DEFAULT_THRESHOLD_DELTA,
+    threshold_grid: list[float] | None = None,
 ) -> TuningGrid:
     """Search the (top_k, threshold) grid for the F1-best operating point.
 
@@ -292,7 +327,12 @@ def tune_threshold(
         train_top1_acc: Last-epoch top-1 accuracy from train_log.json.
         topk_grid: K values to search (default [5, 9, 12]).
         n_thresholds: number of thresholds in the linspace (default 3).
+            Ignored if `threshold_grid` is provided.
         threshold_delta: bandwidth below train_top1_acc (default 0.1).
+            Ignored if `threshold_grid` is provided.
+        threshold_grid: optional pre-built grid. If provided, overrides
+            both `n_thresholds` and `threshold_delta`. For callers that
+            want a custom grid (e.g., the extended diagnostic grid).
 
     Returns:
         TuningGrid with all evaluated cells + the best (top_k, threshold).
@@ -302,11 +342,12 @@ def tune_threshold(
     if not topk_grid:
         raise ValueError("topk_grid must contain at least one K value.")
 
-    threshold_grid = _build_threshold_grid(
-        train_top1_acc=train_top1_acc,
-        n_thresholds=n_thresholds,
-        delta=threshold_delta,
-    )
+    if threshold_grid is None:
+        threshold_grid = _build_threshold_grid(
+            train_top1_acc=train_top1_acc,
+            n_thresholds=n_thresholds,
+            delta=threshold_delta,
+        )
 
     cells: list[TuningCell] = []
     for k in topk_grid:
@@ -387,7 +428,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--threshold-delta",
         type=float,
         default=DEFAULT_THRESHOLD_DELTA,
-        help=f"Bandwidth below train_top1_acc (default {DEFAULT_THRESHOLD_DELTA}).",
+        help=f"Bandwidth below train_top1_acc (default {DEFAULT_THRESHOLD_DELTA}). "
+             f"Ignored when --threshold-grid-spec=extended.",
+    )
+    parser.add_argument(
+        "--threshold-grid-spec",
+        type=str,
+        default="paper",
+        choices=["paper", "extended"],
+        help=(
+            "Threshold grid specification (default: paper). "
+            "'paper' = linspace(top1 - threshold_delta, top1, n_thresholds) "
+            "per LogFiT §III-C; honors --n-thresholds and --threshold-delta. "
+            "'extended' = linspace(top1 - 0.05, min(0.995, top1 + 0.05), 5); "
+            "extends the grid above train_top1_acc with finer resolution. "
+            "'extended' is a documented paper deviation — use for diagnostic / "
+            "ablation runs when the paper grid is upper-boundary-selected. "
+            "--n-thresholds and --threshold-delta are ignored under 'extended'."
+        ),
     )
     return parser
 
@@ -438,13 +496,25 @@ def main() -> None:
             f"covering all values you want to tune over."
         )
 
+    # Resolve the threshold grid from the spec flag.
+    # 'paper' honors --n-thresholds / --threshold-delta (existing behavior).
+    # 'extended' uses a fixed shape (5 points, ±0.05 around train_top1,
+    # capped at 0.995); --n-thresholds / --threshold-delta are ignored.
+    if args.threshold_grid_spec == "extended":
+        threshold_grid = _build_extended_threshold_grid(train_top1_acc)
+    else:  # "paper"
+        threshold_grid = _build_threshold_grid(
+            train_top1_acc=train_top1_acc,
+            n_thresholds=args.n_thresholds,
+            delta=args.threshold_delta,
+        )
+
     # Run tuning
     grid = tune_threshold(
         tune_scores=tune_scores,
         train_top1_acc=train_top1_acc,
         topk_grid=topk_grid,
-        n_thresholds=args.n_thresholds,
-        threshold_delta=args.threshold_delta,
+        threshold_grid=threshold_grid,
     )
 
     # Persist
@@ -455,6 +525,11 @@ def main() -> None:
     # Console summary for the operator
     print(f"[tune_threshold.py] Wrote {output_path}")
     print(f"  train_top1_acc:   {grid.train_top1_acc:.4f}")
+    print(f"  grid spec:        {args.threshold_grid_spec}")
+    print(
+        f"  threshold grid:   "
+        f"[{', '.join(f'{t:.4f}' for t in threshold_grid)}]"
+    )
     print(f"  best (K, θ):      ({grid.best_top_k}, {grid.best_threshold:.4f})")
     best_cell = next(
         c for c in grid.cells

@@ -36,7 +36,7 @@ masking:
 training:
   framework: huggingface_trainer
   transformers_version: 4.45.0
-  epochs: 5 # BGL/TB [D1]
+  epochs: 7 # BGL/TB [D1]
   max_lr: 1.0e-4
   lr_grid: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4]
   backbone: roberta-base # Phase 1 paper-faithful per D_NEW3 (10s windows fit RoBERTa per existing comment; verify post-prep)

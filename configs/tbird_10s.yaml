@@ -25,7 +25,7 @@ cv:
 backbone:
   selection_quantile: 0.8
   threshold_words: 512
-  roberta_id: allenai/longformer-base-4096
+  roberta_id: roberta-base
   longformer_id: allenai/longformer-base-4096
 
 token_length_gate:

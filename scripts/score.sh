@@ -49,7 +49,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 #SBATCH --array=0-4
 #SBATCH --job-name=logfit-score
 #SBATCH --output=results/logs/score-%A_%a.out
